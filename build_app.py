@@ -5,6 +5,16 @@ import io
 
 st.set_page_config(layout="wide")
 
+st.markdown("""
+    <style>
+        html, body, [class^="css"] {
+            direction: rtl;
+            text-align: right;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
 # === Helper Functions ===
 
 def generate_next_id(hierarchy):
@@ -23,6 +33,61 @@ def generate_next_id(hierarchy):
 def load_csv(uploaded_file):
     df = pd.read_excel(uploaded_file)
     return df
+
+def build_hierarchy_from_outline(df):
+    hierarchy = {}
+    id_counter = 1
+    node_stack = {}  # Track last seen node at each level
+
+    type_map = {
+        0: "باب رئيس",  # Top-level category
+        1: "فصل",       # Section
+        2: "موضوع",     # Topic
+        3: "مدخل",      # Entry
+    }
+
+    for _, row in df.iterrows():
+        for col_idx, cell in enumerate(row):
+            if pd.notna(cell) and isinstance(cell, str) and len(cell.strip()) > 0:
+                node_name = cell.strip()
+
+                # Try to get a definition from the next column
+                definition = ""
+                if col_idx + 1 < len(row) and isinstance(row[col_idx + 1], str):
+                    definition = row[col_idx + 1].strip()
+
+                node_id = f"N{id_counter}"
+                id_counter += 1
+
+                # Determine parent: the closest node in a previous column
+                parents = []
+                for i in reversed(range(col_idx)):
+                    if i in node_stack:
+                        parents = [node_stack[i]]
+                        break
+                
+                # Assign the type based on column index
+                node_type = type_map.get(col_idx, "غير معروف")
+
+                # Add node to hierarchy
+                hierarchy[node_id] = {
+                    "name": node_name,
+                    "type": node_type,
+                    "definition": definition,
+                    "parents": parents,
+                    "children": [],
+                }
+
+                # Add this node to the stack at its level
+                node_stack[col_idx] = node_id
+
+    # Add children references
+    for eid, data in hierarchy.items():
+        for pid in data["parents"]:
+            if pid in hierarchy:
+                hierarchy[pid]["children"].append(eid)
+
+    return hierarchy
 
 def build_hierarchy(df):
     hierarchy = {}
@@ -120,14 +185,38 @@ def infer_type(context, current_type):
     return "مدخل"
 
 # UI section to add new elements in context
-def render_add_form(context_label, parent_id_for_new_element, auto_type, form_key_suffix):
+def render_add_form(context_label, parent_id, auto_type, form_key_suffix):
+
+    # Arabic label based on inferred type
+    type_labels = {
+        "مدخل": "مدخل",
+        "موضوع": "موضوع",
+        "فصل": "فصل",
+        "عنصر": "عنصر",
+    }
+
+    type_icons = {
+        "مدخل": "🟡",  # Yellow
+        "موضوع": "🟠",  # Orange
+        "فصل": "🔴",   # Red
+    }
+    icon = type_icons.get(auto_type, "📁")
+
+    context_label = type_labels.get(auto_type, auto_type)
+
     unique_form_key = f"add_form_{context_label}_{form_key_suffix}"
-    with st.expander(f"➕ إضافة عنصر كـ {context_label}", expanded=False):
+    with st.expander(f"➕ إضافة عنصر ك{context_label} {icon}", expanded=False):
+
         with st.form(unique_form_key):
             new_id = generate_next_id(st.session_state["hierarchy"])
             new_name = st.text_input("🏷️ الاسم", key=f"name_{unique_form_key}")
-            st.markdown(f"<p style='text-align: right; direction: rtl'><strong>📌 الرقم التعريفي:</strong> {new_id}</p>", unsafe_allow_html=True)
+            # st.markdown(f"<p style='text-align: right; direction: rtl'><strong>📌 الرقم التعريفي:</strong> {new_id}</p>", unsafe_allow_html=True)
             st.markdown(f"<p style='text-align: right; direction: rtl'><strong>📂 النوع:</strong> {auto_type}</p>", unsafe_allow_html=True)
+            st.markdown(
+                f"<p style='text-align: right; direction: rtl'>"
+                f"<strong>📌 سيتم الإضافة إلى:</strong> {st.session_state["hierarchy"][parent_id]["name"]}</p>",
+                unsafe_allow_html=True
+            )
 
             new_def = ""
             if auto_type == "مدخل":
@@ -135,10 +224,44 @@ def render_add_form(context_label, parent_id_for_new_element, auto_type, form_ke
 
             submitted = st.form_submit_button("إضافة")
             if submitted:
-                add_element(st.session_state["hierarchy"], new_id, new_name, auto_type, new_def, parent_id_for_new_element)
+                add_element(st.session_state["hierarchy"], new_id, new_name, auto_type, new_def, parent_id)
                 st.session_state.show_add_success = True
                 st.rerun()
                 
+# UI for adding multiple 'مدخل' elements at once
+def render_batch_madkhal_form(parent_id, form_key_suffix):
+    unique_form_key = f"batch_add_madkhal_form_{form_key_suffix}"
+    with st.expander("➕ إضافة مداخل متعددة", expanded=False):
+        with st.form(unique_form_key):
+            st.markdown("👥 أدخل أسماء المداخل كل اسم في سطر منفصل:")
+            names_input = st.text_area("✍️ أسماء المداخل", key=f"batch_names_{unique_form_key}")
+
+            st.markdown(
+                f"<p style='text-align: right; direction: rtl'>"
+                f"<strong>📂 النوع:</strong> مدخل</p>",
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                f"<p style='text-align: right; direction: rtl'>"
+                f"<strong>📌 سيتم الإضافة إلى:</strong> {st.session_state["hierarchy"][parent_id]["name"]}</p>",
+                unsafe_allow_html=True
+            )
+
+            submitted = st.form_submit_button("إضافة الكل")
+            if submitted:
+                names = [name.strip() for name in names_input.split("\n") if name.strip()]
+                for name in names:
+                    new_id = generate_next_id(st.session_state["hierarchy"])
+                    add_element(
+                        st.session_state["hierarchy"],
+                        new_id,
+                        name.split(":", 1)[0],
+                        "مدخل",
+                        name,  # or use a default definition or leave empty
+                        parent_id
+                    )
+                st.success(f"تمت إضافة {len(names)} مدخل.")
+                st.rerun()
 
 if "show_add_success" in st.session_state and st.session_state.show_add_success:
     st.toast("تم إضافة العنصر الجديد ✅", icon="➕")
@@ -200,7 +323,11 @@ if project_choice == "📂 تحميل ملف موجود":
     uploaded_file = st.sidebar.file_uploader("📤 تحميل ملف Excel", type=["xlsx"])
     if uploaded_file and "hierarchy" not in st.session_state:
         df = load_csv(uploaded_file)
-        hierarchy = build_hierarchy(df)
+        try:
+            hierarchy = build_hierarchy(df)
+        except:
+            df = pd.read_excel(uploaded_file, header=None)
+            hierarchy = build_hierarchy_from_outline(df)
         st.session_state["hierarchy"] = hierarchy
         st.session_state["uploaded_filename"] = uploaded_file.name
         st.session_state["current_id"] = next((eid for eid, d in hierarchy.items() if not d["parents"]), None)
@@ -322,6 +449,8 @@ if "hierarchy" in st.session_state:
     # Single "Add Child" button
     if current["type"] != "مدخل":
         render_add_form("ابن", current_id, infer_type("child", current["type"]), f"{current_id}_child_add")
+        if infer_type("child", current["type"]) == "مدخل":
+            render_batch_madkhal_form(current_id, f"{current_id}_batch_add")
     else:
         st.info("لا يمكن إضافة ابن إلى مدخل.")
     
